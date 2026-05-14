@@ -2,13 +2,14 @@
 
 [简体中文](./README.CN.md)
 
-`socket.io-cluster` is a Go Socket.IO server library for building Socket.IO v4 / Engine.IO v4 applications that can run as a single node or as a built-in multi-node cluster.
+`socket.io-cluster` is a Go Socket.IO server library that implements Socket.IO protocol v5 over Engine.IO protocol v4. It can run as a single node or as a built-in multi-node cluster.
 
 It focuses on the server-side developer experience: mount it as an `http.Handler`, register event handlers, use rooms and ACKs, and enable cross-node delivery without adding Redis, NATS, or another external message bus.
 
 ## Features
 
-- Socket.IO v4 / Engine.IO v4 server support.
+- Socket.IO protocol v5 over Engine.IO protocol v4.
+- Compatible with Socket.IO JavaScript clients v4.x, including the tested `socket.io-client@4.8.x` line.
 - WebSocket and polling transports, including WebSocket upgrade.
 - Namespaces, rooms, broadcast, `except`, local-only broadcast, ACK callbacks, binary events, and binary ACKs.
 - Built-in peer-to-peer cluster fanout on the same Socket.IO path.
@@ -60,7 +61,7 @@ func main() {
 }
 ```
 
-A Socket.IO JavaScript client can connect normally:
+A Socket.IO JavaScript client v4.x can connect normally:
 
 ```js
 import { io } from "socket.io-client";

@@ -2,13 +2,14 @@
 
 [English](./README.md)
 
-`socket.io-cluster` 是一个 Go Socket.IO server library，用于构建兼容 Socket.IO v4 / Engine.IO v4 的服务端应用；同一套代码可以单节点运行，也可以直接作为内置多节点集群运行。
+`socket.io-cluster` 是一个 Go Socket.IO server library，实现 Socket.IO protocol v5 over Engine.IO protocol v4；同一套代码可以单节点运行，也可以直接作为内置多节点集群运行。
 
 它面向服务端使用者：作为 `http.Handler` 挂载，注册事件处理器，使用 room、ACK、二进制事件，并在不额外引入 Redis、NATS 等消息总线的情况下完成跨节点投递。
 
 ## 特性
 
-- 支持 Socket.IO v4 / Engine.IO v4 服务端协议。
+- 支持 Socket.IO protocol v5 over Engine.IO protocol v4。
+- 兼容 Socket.IO JavaScript client v4.x，包括已测试的 `socket.io-client@4.8.x` 系列。
 - 支持 WebSocket、polling 和 WebSocket upgrade。
 - 支持 namespace、room、broadcast、`except`、本地广播、ACK 回调、二进制事件和二进制 ACK。
 - 内置 peer-to-peer 集群 fanout，复用同一个 Socket.IO path。
@@ -60,7 +61,7 @@ func main() {
 }
 ```
 
-Socket.IO JavaScript client 可以正常连接：
+Socket.IO JavaScript client v4.x 可以正常连接：
 
 ```js
 import { io } from "socket.io-client";
