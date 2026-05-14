@@ -4,3 +4,7 @@ test/e2e/node_modules/
 # Go test artifacts
 *.test
 coverage.out
+
+# local Kubernetes e2e build artifacts
+test/k8s/bin/
+test/k8s/.port-forward-*.log

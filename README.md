@@ -278,6 +278,10 @@ golangci-lint run ./...
 
 The Socket.IO JavaScript e2e files live under `test/e2e/`.
 
+Kubernetes cluster e2e manifests and the reusable verification flow live under
+[`test/k8s/`](./test/k8s/). Chinese version:
+[`test/k8s/README.CN.md`](./test/k8s/README.CN.md).
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).

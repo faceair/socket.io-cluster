@@ -278,6 +278,10 @@ golangci-lint run ./...
 
 Socket.IO JavaScript e2e 文件位于 `test/e2e/`。
 
+Kubernetes cluster e2e 清单和可复用验证流程位于
+[`test/k8s/`](./test/k8s/)，英文文档见
+[`test/k8s/README.md`](./test/k8s/README.md)。
+
 ## License
 
 MIT。见 [LICENSE](./LICENSE)。
