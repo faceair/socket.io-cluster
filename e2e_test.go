@@ -1,0 +1,49 @@
+package sio
+
+import (
+	"context"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestSocketIOClientE2E(t *testing.T) {
+	if os.Getenv("SIO_JS_E2E") != "1" {
+		t.Skip("set SIO_JS_E2E=1 to run JS socket.io-client e2e")
+	}
+	server := mustNewServer(t, &ServerConfig{
+		AcceptAnyNamespace: true,
+		Port:               "3000",
+		OnError:            func(err error) { t.Log(err) },
+	})
+	server.OnConnection(func(socket ServerSocket) {
+		socket.OnEvent("client-event", func(name string, ack func(string)) {
+			ack("ack:" + name)
+		})
+		socket.OnEvent("transport", func(name string) { socket.Emit("server-event", "hello:"+name) })
+		socket.OnEvent("server-binary", func() { socket.Emit("binary-event", Binary("from-server")) })
+		socket.OnEvent("client-binary", func(data []byte, ack func(Binary)) {
+			ack(Binary("ack-bin:" + string(data)))
+		})
+	})
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+	defer func() { _ = server.Close() }()
+
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "node", "socketio-client.mjs")
+	cmd.Dir = filepath.Join(root, "test/e2e")
+	cmd.Env = append(os.Environ(), "SIO_E2E_URL="+ts.URL)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node e2e failed: %v\n%s", err, out)
+	}
+}

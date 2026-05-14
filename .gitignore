@@ -1,0 +1,6 @@
+# local dependencies for JS e2e tests
+test/e2e/node_modules/
+
+# Go test artifacts
+*.test
+coverage.out
