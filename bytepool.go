@@ -98,6 +98,18 @@ func (b *pooledBytes) AppendString(v string) []byte {
 	return b.B
 }
 
+func (b *pooledBytes) AppendRoom(v Room) []byte {
+	b.Ensure(len(v))
+	b.B = append(b.B, v...)
+	return b.B
+}
+
+func (b *pooledBytes) AppendSocketID(v SocketID) []byte {
+	b.Ensure(len(v))
+	b.B = append(b.B, v...)
+	return b.B
+}
+
 func (b *pooledBytes) AppendUint(v uint64) []byte {
 	b.Ensure(20)
 	b.B = strconv.AppendUint(b.B, v, 10)

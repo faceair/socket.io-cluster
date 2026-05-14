@@ -14,10 +14,16 @@ type broadcastOptions struct {
 
 type localAdapter struct {
 	mu         sync.RWMutex
-	rooms      map[Room]map[SocketID]*serverSocket
-	sids       map[SocketID]map[Room]struct{}
+	rooms      map[Room]*roomEntry
+	sids       map[SocketID]map[Room]*roomEntry
 	socketByID map[SocketID]*serverSocket
 	epoch      uint64
+}
+
+type roomEntry struct {
+	name    Room
+	owner   *pooledBytes
+	members map[SocketID]*serverSocket
 }
 
 var adapterSocketSlicePool = sync.Pool{New: func() any {
@@ -27,8 +33,8 @@ var adapterSocketSlicePool = sync.Pool{New: func() any {
 
 func newLocalAdapter() *localAdapter {
 	return &localAdapter{
-		rooms:      make(map[Room]map[SocketID]*serverSocket),
-		sids:       make(map[SocketID]map[Room]struct{}),
+		rooms:      make(map[Room]*roomEntry),
+		sids:       make(map[SocketID]map[Room]*roomEntry),
 		socketByID: make(map[SocketID]*serverSocket),
 	}
 }
@@ -42,12 +48,12 @@ func (a *localAdapter) addSocket(s *serverSocket) {
 
 func (a *localAdapter) removeSocket(sid SocketID) {
 	a.mu.Lock()
-	rooms := a.sids[sid]
-	for room := range rooms {
-		members := a.rooms[room]
-		delete(members, sid)
-		if len(members) == 0 {
-			delete(a.rooms, room)
+	entries := a.sids[sid]
+	for _, entry := range entries {
+		delete(entry.members, sid)
+		if len(entry.members) == 0 {
+			delete(a.rooms, entry.name)
+			entry.release()
 		}
 	}
 	delete(a.sids, sid)
@@ -56,43 +62,103 @@ func (a *localAdapter) removeSocket(sid SocketID) {
 }
 
 func (a *localAdapter) addAll(sid SocketID, socket *serverSocket, rooms []Room) {
+	a.addAllWithRoomOwnership(sid, socket, rooms, false)
+}
+
+func (a *localAdapter) addAllOwned(sid SocketID, socket *serverSocket, rooms []Room) {
+	a.addAllWithRoomOwnership(sid, socket, rooms, true)
+}
+
+func (a *localAdapter) addAllWithRoomOwnership(sid SocketID, socket *serverSocket, rooms []Room, ownNewRooms bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, ok := a.sids[sid]; !ok {
-		a.sids[sid] = make(map[Room]struct{}, len(rooms)+1)
+		a.sids[sid] = make(map[Room]*roomEntry, len(rooms)+1)
 	}
 	for _, room := range rooms {
-		a.sids[sid][room] = struct{}{}
-		members := a.rooms[room]
-		if members == nil {
-			members = make(map[SocketID]*serverSocket)
-			a.rooms[room] = members
+		entry := a.rooms[room]
+		if entry == nil {
+			entry = newRoomEntry(room, ownNewRooms)
+			a.rooms[entry.name] = entry
 		}
-		members[sid] = socket
+		a.sids[sid][entry.name] = entry
+		entry.members[sid] = socket
 	}
 }
 
 func (a *localAdapter) delete(sid SocketID, room Room) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if rooms := a.sids[sid]; rooms != nil {
-		delete(rooms, room)
+	entry := a.rooms[room]
+	if entry == nil {
+		return
 	}
-	if members := a.rooms[room]; members != nil {
-		delete(members, sid)
-		if len(members) == 0 {
-			delete(a.rooms, room)
+	if entries := a.sids[sid]; entries != nil {
+		delete(entries, entry.name)
+	}
+	delete(entry.members, sid)
+	if len(entry.members) == 0 {
+		delete(a.rooms, entry.name)
+		entry.release()
+	}
+}
+
+func newRoomEntry(room Room, owned bool) *roomEntry {
+	if !owned {
+		return &roomEntry{name: room, members: make(map[SocketID]*serverSocket)}
+	}
+	owner := acquireBytes(len(room))
+	name := appendOwnedRoom(owner, room)
+	return &roomEntry{name: name, owner: owner, members: make(map[SocketID]*serverSocket)}
+}
+
+func appendOwnedRoom(owner *pooledBytes, room Room) Room {
+	if room == "" {
+		return ""
+	}
+	start := len(owner.B)
+	owner.AppendRoom(room)
+	return Room(bytesToStringView(owner.B[start:]))
+}
+
+func (e *roomEntry) release() {
+	if e == nil {
+		return
+	}
+	if e.owner != nil {
+		e.owner.Release()
+		e.owner = nil
+	}
+	e.name = ""
+	for sid := range e.members {
+		delete(e.members, sid)
+	}
+}
+
+func (e *roomEntry) markExcept(token uint64) {
+	for _, socket := range e.members {
+		socket.matchExcept = token
+	}
+}
+
+func (e *roomEntry) appendMatches(out []*serverSocket, token uint64) []*serverSocket {
+	for _, socket := range e.members {
+		if socket.matchSeen == token || socket.matchExcept == token {
+			continue
 		}
+		socket.matchSeen = token
+		out = append(out, socket)
 	}
+	return out
 }
 
 func (a *localAdapter) socketRooms(sid SocketID) []Room {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	rooms := a.sids[sid]
-	out := make([]Room, 0, len(rooms))
-	for room := range rooms {
-		out = append(out, room)
+	entries := a.sids[sid]
+	out := make([]Room, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.name)
 	}
 	return out
 }
@@ -104,18 +170,14 @@ func (a *localAdapter) apply(opts broadcastOptions, fn func(*serverSocket)) int 
 	a.epoch++
 	token := a.epoch
 	for _, room := range opts.Except {
-		for _, socket := range a.rooms[room] {
-			socket.matchExcept = token
+		if entry := a.rooms[room]; entry != nil {
+			entry.markExcept(token)
 		}
 	}
 	if len(opts.Rooms) > 0 {
 		for _, room := range opts.Rooms {
-			for _, socket := range a.rooms[room] {
-				if socket.matchSeen == token || socket.matchExcept == token {
-					continue
-				}
-				socket.matchSeen = token
-				matches = append(matches, socket)
+			if entry := a.rooms[room]; entry != nil {
+				matches = entry.appendMatches(matches, token)
 			}
 		}
 	} else {
@@ -150,8 +212,8 @@ func (a *localAdapter) stats() (sockets, rooms, memberships int) {
 	defer a.mu.RUnlock()
 	sockets = len(a.socketByID)
 	rooms = len(a.rooms)
-	for _, members := range a.rooms {
-		memberships += len(members)
+	for _, entry := range a.rooms {
+		memberships += len(entry.members)
 	}
 	return sockets, rooms, memberships
 }

@@ -20,6 +20,7 @@ type recoverySession struct {
 	sid       SocketID
 	rooms     []Room
 	expiresAt time.Time
+	owner     *pooledBytes
 }
 
 type recoveryPacket struct {
@@ -30,6 +31,7 @@ type recoveryPacket struct {
 	packet           []byte
 	packetOwner      *pooledBytes
 	attachments      *byteBatch
+	views            *pooledByteViews
 	releaseAfterSend bool
 	createdAt        time.Time
 }
@@ -87,15 +89,13 @@ func (s *recoveryStore) save(namespace, pid string, sid SocketID, rooms []Room, 
 	if pid == "" {
 		return
 	}
-	session := &recoverySession{
-		namespace: namespace,
-		pid:       pid,
-		sid:       sid,
-		rooms:     append([]Room(nil), rooms...),
-		expiresAt: now.Add(s.maxAge),
-	}
+	session := newRecoverySession(namespace, pid, sid, rooms, now.Add(s.maxAge))
+	key := recoveryKey(namespace, pid)
 	s.mu.Lock()
-	s.sessions[recoveryKey(namespace, pid)] = session
+	if previous := s.sessions[key]; previous != nil {
+		previous.release()
+	}
+	s.sessions[key] = session
 	s.pruneLocked(now)
 	s.mu.Unlock()
 }
@@ -110,7 +110,11 @@ func (s *recoveryStore) snapshot(namespace, pid, offset string, now time.Time) (
 
 func (s *recoveryStore) deleteSession(namespace, pid string) {
 	s.mu.Lock()
-	delete(s.sessions, recoveryKey(namespace, pid))
+	key := recoveryKey(namespace, pid)
+	if session := s.sessions[key]; session != nil {
+		session.release()
+		delete(s.sessions, key)
+	}
 	s.mu.Unlock()
 }
 
@@ -125,7 +129,10 @@ func (s *recoveryStore) recoverWithConsume(namespace, pid, offset string, now ti
 	s.pruneLocked(now)
 	session := s.sessions[key]
 	if session == nil || now.After(session.expiresAt) {
-		delete(s.sessions, key)
+		if session != nil {
+			session.release()
+			delete(s.sessions, key)
+		}
 		return nil, nil, false
 	}
 	if consume {
@@ -139,11 +146,12 @@ func (s *recoveryStore) recoverWithConsume(namespace, pid, offset string, now ti
 		if !recoveryPacketMatches(packet.opts, session.rooms) {
 			continue
 		}
-		packets = append(packets, packet)
+		packets = append(packets, packet.cloneForReplay())
 	}
-	copySession := *session
-	copySession.rooms = append([]Room(nil), session.rooms...)
-	return &copySession, packets, true
+	if consume {
+		return session, packets, true
+	}
+	return session.clone(), packets, true
 }
 
 func (s *recoveryStore) pruneLocked(now time.Time) {
@@ -156,25 +164,115 @@ func (s *recoveryStore) pruneLocked(now time.Time) {
 			packet.release()
 		}
 	}
+	for i := len(keep); i < len(s.packets); i++ {
+		s.packets[i] = recoveryPacket{}
+	}
 	s.packets = keep
 	for key, session := range s.sessions {
 		if now.After(session.expiresAt) {
+			session.release()
 			delete(s.sessions, key)
 		}
 	}
 }
 
 func (p *recoveryPacket) attachmentViews() [][]byte {
-	if p == nil || p.attachments == nil {
+	if p == nil {
 		return nil
 	}
-	return p.attachments.Views()
+	if p.attachments != nil {
+		return p.attachments.Views()
+	}
+	if p.views != nil {
+		return p.views.V
+	}
+	return nil
+}
+
+func (p recoveryPacket) cloneForReplay() recoveryPacket {
+	packetOwner := acquireBytes(len(p.packet))
+	packetOwner.AppendBytes(p.packet)
+	return recoveryPacket{
+		namespace:        p.namespace,
+		offset:           p.offset,
+		offsetSeq:        p.offsetSeq,
+		opts:             p.opts,
+		packet:           packetOwner.B,
+		packetOwner:      packetOwner,
+		attachments:      copyAttachmentsToBatch(p.attachmentViews()),
+		releaseAfterSend: true,
+		createdAt:        p.createdAt,
+	}
+}
+
+func (s *recoverySession) clone() *recoverySession {
+	if s == nil {
+		return nil
+	}
+	return newRecoverySession(s.namespace, s.pid, s.sid, s.rooms, s.expiresAt)
+}
+
+func (s *recoverySession) release() {
+	if s == nil {
+		return
+	}
+	if s.owner != nil {
+		s.owner.Release()
+	}
+	s.owner = nil
+	s.pid = ""
+	s.sid = ""
+	s.rooms = nil
+}
+
+func newRecoverySession(namespace, pid string, sid SocketID, rooms []Room, expiresAt time.Time) *recoverySession {
+	total := len(pid) + len(sid)
+	for _, room := range rooms {
+		total += len(room)
+	}
+	owner := acquireBytes(total)
+	ownedPID := appendOwnedString(owner, pid)
+	ownedSID := appendOwnedSocketID(owner, sid)
+	ownedRooms := make([]Room, 0, len(rooms))
+	for _, room := range rooms {
+		ownedRooms = append(ownedRooms, appendOwnedRoom(owner, room))
+	}
+	return &recoverySession{
+		namespace: namespace,
+		pid:       ownedPID,
+		sid:       ownedSID,
+		rooms:     ownedRooms,
+		expiresAt: expiresAt,
+		owner:     owner,
+	}
+}
+
+func appendOwnedString(owner *pooledBytes, value string) string {
+	if value == "" {
+		return ""
+	}
+	start := len(owner.B)
+	owner.AppendString(value)
+	return bytesToStringView(owner.B[start:])
+}
+
+func appendOwnedSocketID(owner *pooledBytes, value SocketID) SocketID {
+	if value == "" {
+		return ""
+	}
+	start := len(owner.B)
+	owner.AppendSocketID(value)
+	return SocketID(bytesToStringView(owner.B[start:]))
 }
 
 func (p *recoveryPacket) release() {
 	if p.attachments != nil {
 		p.attachments.Release()
 		p.attachments = nil
+	}
+	if p.views != nil {
+		p.views.Release()
+		p.views = nil
 	}
 	if p.packetOwner != nil {
 		p.packetOwner.Release()

@@ -72,6 +72,16 @@ func (n *Namespace) add(conn *engineConn, auth json.RawMessage, reqTime time.Tim
 	var session *recoverySession
 	var replay []recoveryPacket
 	var recovered bool
+	sessionAttached := false
+	replayReleased := false
+	defer func() {
+		if recovered && !sessionAttached {
+			session.release()
+		}
+		if !replayReleased {
+			releaseReplayPackets(replay)
+		}
+	}()
 	pid := ""
 	if n.server.recovery != nil {
 		var recovery recoveryAuth
@@ -108,9 +118,13 @@ func (n *Namespace) add(conn *engineConn, auth json.RawMessage, reqTime time.Tim
 			}
 		}
 	}
+	if recovered {
+		socket.recoverySession = session
+		sessionAttached = true
+	}
 	n.adapter.addSocket(socket)
 	if recovered {
-		n.adapter.addAll(socket.id, socket, session.rooms)
+		n.adapter.addAllOwned(socket.id, socket, session.rooms)
 		n.server.metrics.socketsRecovered.Add(1)
 	}
 	conn.addSocket(socket)
@@ -125,6 +139,7 @@ func (n *Namespace) add(conn *engineConn, auth json.RawMessage, reqTime time.Tim
 			packet.release()
 		}
 	}
+	replayReleased = true
 	return socket, nil
 }
 

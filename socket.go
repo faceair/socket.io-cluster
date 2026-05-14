@@ -9,13 +9,14 @@ import (
 )
 
 type serverSocket struct {
-	id        SocketID
-	pid       string
-	server    *Server
-	conn      *engineConn
-	namespace *Namespace
-	connected atomic.Bool
-	recovered bool
+	id              SocketID
+	pid             string
+	server          *Server
+	conn            *engineConn
+	namespace       *Namespace
+	connected       atomic.Bool
+	recovered       bool
+	recoverySession *recoverySession
 
 	handlers *eventHandlers
 	acks     *ackStore
@@ -159,6 +160,10 @@ func (s *serverSocket) onClose(reason Reason) {
 	s.namespace.remove(s)
 	s.conn.removeSocket(s.namespace.name)
 	s.disconnectHandlers.forEach(func(f ServerSocketDisconnectFunc) { f(reason) })
+	if s.recoverySession != nil {
+		s.recoverySession.release()
+		s.recoverySession = nil
+	}
 }
 
 func (s *serverSocket) onError(err error) {

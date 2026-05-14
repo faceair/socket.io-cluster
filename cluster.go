@@ -543,6 +543,8 @@ func (c *clusterNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		defer session.release()
+		defer releaseReplayPackets(replay)
 		body := encodeCSRResponse(session, replay)
 		defer body.Release()
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -724,7 +726,11 @@ func encodeCSRResponse(session *recoverySession, replay []recoveryPacket) *poole
 	return out
 }
 
-func decodeCSRResponse(namespace string, body []byte) (*recoverySession, []recoveryPacket, error) {
+func decodeCSRResponse(namespace string, owner *pooledBytes) (*recoverySession, []recoveryPacket, error) {
+	if owner == nil {
+		return nil, nil, fmt.Errorf("sio cluster: empty csr response owner")
+	}
+	body := owner.B
 	if len(body) < len(clusterCSRMagic) || !bytes.Equal(body[:len(clusterCSRMagic)], clusterCSRMagic[:]) {
 		return nil, nil, fmt.Errorf("sio cluster: invalid csr response magic")
 	}
@@ -766,40 +772,42 @@ func decodeCSRResponse(namespace string, body []byte) (*recoverySession, []recov
 			return nil, nil, err
 		}
 		pos += n
-		packetOwner := acquireBytes(len(packetBytes))
-		packetOwner.AppendBytes(packetBytes)
 		attachmentCount, n := binary.Uvarint(body[pos:])
 		if n <= 0 {
-			packetOwner.Release()
 			releaseReplayPackets(replay)
 			return nil, nil, fmt.Errorf("sio cluster: invalid csr attachment count")
 		}
 		pos += n
-		attachments := acquireByteBatch(int(attachmentCount), 0)
+		var attachments *pooledByteViews
+		if attachmentCount != 0 {
+			attachments = acquireByteViews(int(attachmentCount))
+		}
 		for j := 0; j < int(attachmentCount); j++ {
 			attachment, n, err := readBinaryBytes(body[pos:])
 			if err != nil {
-				attachments.Release()
-				packetOwner.Release()
+				if attachments != nil {
+					attachments.Release()
+				}
 				releaseReplayPackets(replay)
 				return nil, nil, err
 			}
 			pos += n
-			attachments.AppendBytes(attachment)
-		}
-		if attachmentCount == 0 {
-			attachments.Release()
-			attachments = nil
+			attachments.Append(attachment)
 		}
 		replay = append(replay, recoveryPacket{
 			namespace:        namespace,
-			packet:           packetOwner.B,
-			packetOwner:      packetOwner,
-			attachments:      attachments,
+			packet:           packetBytes,
+			views:            attachments,
 			releaseAfterSend: true,
 		})
 	}
-	return &recoverySession{namespace: namespace, pid: pid, sid: SocketID(sid), rooms: rooms}, replay, nil
+	session := newRecoverySession(namespace, pid, SocketID(sid), rooms, time.Time{})
+	if len(replay) == 0 {
+		owner.Release()
+	} else {
+		replay[len(replay)-1].packetOwner = owner
+	}
+	return session, replay, nil
 }
 
 func releaseReplayPackets(replay []recoveryPacket) {
@@ -906,15 +914,17 @@ func (c *clusterNode) recoverCSR(namespace, pid, offset string) (*recoverySessio
 	extra.Set("offset", offset)
 	responses := c.postToPeers("csr", namespace, broadcastOptions{}, extra, nil)
 	defer releaseClusterResponses(responses)
-	for _, response := range responses {
+	for i := range responses {
+		response := &responses[i]
 		if response.statusCode != http.StatusOK || len(response.body) == 0 {
 			continue
 		}
-		session, replay, err := decodeCSRResponse(namespace, response.body)
+		session, replay, err := decodeCSRResponse(namespace, response.bodyOwner)
 		if err != nil {
 			c.server.reportError(fmt.Errorf("sio cluster: csr response from %s decode failed: %w", response.peer, err))
 			continue
 		}
+		response.bodyOwner = nil
 		return session, replay, true
 	}
 	return nil, nil, false
