@@ -83,9 +83,9 @@ func newClusterNode(server *Server, port string, secret string, config ClusterCo
 		secret:            secret,
 		peers:             normalizePeers(defaultPeers(config.Peers), path),
 		dnsNames:          defaultHeadlessDNS(config.HeadlessDNS),
-		client:            &http.Client{Timeout: cmp.Or(config.RequestTimeout, 2*time.Second)},
-		requestTimeout:    cmp.Or(config.RequestTimeout, 2*time.Second),
-		heartbeatInterval: cmp.Or(config.HeartbeatInterval, 30*time.Second),
+		client:            &http.Client{Timeout: cmp.Or(config.RequestTimeout, time.Second)},
+		requestTimeout:    cmp.Or(config.RequestTimeout, time.Second),
+		heartbeatInterval: cmp.Or(config.HeartbeatInterval, time.Second),
 		workerCount:       cmp.Or(config.FanoutWorkers, 8),
 	}
 	if c.workerCount < 1 {

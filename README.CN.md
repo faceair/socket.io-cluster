@@ -125,8 +125,8 @@ server.Use(func(socket sio.ServerSocket, handshake *sio.Handshake) any {
 | `Cluster.AdvertiseURL` | peers 访问当前节点的完整 URL | 由 host + port 自动拼接 |
 | `Cluster.Peers` | 静态 peer endpoints | `SIO_CLUSTER_PEERS`、`SOCKETIO_CLUSTER_PEERS` |
 | `Cluster.HeadlessDNS` | 用于解析 peer IP 的 DNS 名称 | `SIO_CLUSTER_HEADLESS_DNS`、`SOCKETIO_CLUSTER_HEADLESS_DNS`、service env，或从 `POD_NAME` 推断 |
-| `Cluster.RequestTimeout` | peer 请求超时 | `2s` |
-| `Cluster.HeartbeatInterval` | DNS 刷新间隔 | `30s` |
+| `Cluster.RequestTimeout` | peer 请求超时 | `1s` |
+| `Cluster.HeartbeatInterval` | DNS 刷新间隔 | `1s` |
 | `Cluster.FanoutWorkers` | 跨节点 fanout worker 数 | `8` |
 
 ### Port 和 AdvertiseURL

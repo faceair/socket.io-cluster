@@ -125,8 +125,8 @@ If the secret is empty, or if neither a port nor a full advertise URL is availab
 | `Cluster.AdvertiseURL` | Full URL peers use to call this node | Built from host + port |
 | `Cluster.Peers` | Static peer endpoints | `SIO_CLUSTER_PEERS`, `SOCKETIO_CLUSTER_PEERS` |
 | `Cluster.HeadlessDNS` | DNS names to resolve peer IPs from | `SIO_CLUSTER_HEADLESS_DNS`, `SOCKETIO_CLUSTER_HEADLESS_DNS`, service env, or inferred from `POD_NAME` |
-| `Cluster.RequestTimeout` | Peer request timeout | `2s` |
-| `Cluster.HeartbeatInterval` | DNS refresh interval | `30s` |
+| `Cluster.RequestTimeout` | Peer request timeout | `1s` |
+| `Cluster.HeartbeatInterval` | DNS refresh interval | `1s` |
 | `Cluster.FanoutWorkers` | Cross-node fanout workers | `8` |
 
 ### Port vs. AdvertiseURL

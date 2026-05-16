@@ -23,9 +23,6 @@ func main() {
 		Port:               port,
 		Secret:             getenv("SIO_CLUSTER_SECRET", "k8s-e2e-secret"),
 		AcceptAnyNamespace: true,
-		Cluster: sio.ClusterConfig{
-			HeartbeatInterval: time.Second,
-		},
 		ServerConnectionStateRecovery: sio.ServerConnectionStateRecovery{
 			Enabled:                  true,
 			MaxDisconnectionDuration: 2 * time.Minute,

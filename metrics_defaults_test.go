@@ -22,8 +22,11 @@ func TestDefaultClusterNodeIDUsesPodName(t *testing.T) {
 	if s.cluster.workerCount != 8 {
 		t.Fatalf("fanout workers = %d, want 8", s.cluster.workerCount)
 	}
-	if s.cluster.requestTimeout != 2*time.Second {
-		t.Fatalf("request timeout = %s, want 2s", s.cluster.requestTimeout)
+	if s.cluster.requestTimeout != time.Second {
+		t.Fatalf("request timeout = %s, want 1s", s.cluster.requestTimeout)
+	}
+	if s.cluster.heartbeatInterval != time.Second {
+		t.Fatalf("heartbeat interval = %s, want 1s", s.cluster.heartbeatInterval)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/socket.io/?transport=cluster&op=fetch&nsp=/", nil)
 	req.Header.Set(clusterSecretHeader, "test-secret")
