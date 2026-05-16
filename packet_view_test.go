@@ -84,3 +84,22 @@ func TestParsePacketViewAllocs(t *testing.T) {
 		t.Fatalf("ParsePacketView allocations = %v, want 0", allocs)
 	}
 }
+
+func TestParsePacketViewRejectsCorruptedFramesRepeatedly(t *testing.T) {
+	inputs := [][]byte{
+		nil,
+		[]byte(`x`),
+		[]byte(`2/chat,`),
+		[]byte(`2/chat,not-json`),
+		[]byte(`5-/chat,["bin"]`),
+		[]byte(`50-/chat,["bin"]`),
+		[]byte(`51/chat,["bin"]`),
+	}
+	for i := 0; i < 1000; i++ {
+		for _, input := range inputs {
+			if _, err := ParsePacketView(input); err == nil {
+				t.Fatalf("ParsePacketView(%q) succeeded, want error", input)
+			}
+		}
+	}
+}

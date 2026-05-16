@@ -5,15 +5,34 @@ if (!url) throw new Error("SIO_E2E_URL is required");
 
 const validAuth = { token: "good-token", workspaceId: "workspace-1" };
 
-async function runClient(name, opts) {
-  const socket = io(url, {
+function connectSocket(name, opts) {
+  return io(url, {
     path: "/socket.io/",
     reconnection: false,
     timeout: 3000,
     autoUnref: true,
+    forceNew: true,
     auth: validAuth,
     ...opts,
   });
+}
+
+function waitForConnect(socket, name) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${name}: connect timeout`)), 3000);
+    socket.on("connect", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    socket.on("connect_error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+async function runClient(name, opts) {
+  const socket = connectSocket(name, opts);
 
   const gotServerEvent = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${name}: server-event timeout`)), 3000);
@@ -24,10 +43,7 @@ async function runClient(name, opts) {
     });
   });
 
-  await new Promise((resolve, reject) => {
-    socket.on("connect", resolve);
-    socket.on("connect_error", reject);
-  });
+  await waitForConnect(socket, name);
 
   socket.emit("transport", name);
   await gotServerEvent;
@@ -76,12 +92,8 @@ async function runClient(name, opts) {
 }
 
 async function runRejectedClient() {
-  const socket = io(url, {
-    path: "/socket.io/",
+  const socket = connectSocket("reject", {
     transports: ["websocket"],
-    reconnection: false,
-    timeout: 3000,
-    autoUnref: true,
     auth: { token: "bad-token", workspaceId: "workspace-1" },
   });
   const message = await new Promise((resolve, reject) => {
@@ -100,6 +112,117 @@ async function runRejectedClient() {
   socket.io.engine.close();
 }
 
+async function runNamespaceClient() {
+  const socket = io(`${url}/workspace`, {
+    path: "/socket.io/",
+    transports: ["websocket"],
+    reconnection: false,
+    timeout: 3000,
+    autoUnref: true,
+    forceNew: true,
+    auth: { token: "workspace-token", workspaceId: "workspace-1" },
+  });
+  await waitForConnect(socket, "namespace");
+  const ack = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("namespace: ack timeout")), 3000);
+    socket.emit("namespace-event", "workspace", (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
+  if (ack !== "namespace-ack:workspace") throw new Error(`namespace: bad ack ${ack}`);
+  socket.disconnect();
+  socket.io.engine.close();
+}
+
+async function runRejectedNamespaceClient() {
+  const socket = io(`${url}/workspace`, {
+    path: "/socket.io/",
+    transports: ["websocket"],
+    reconnection: false,
+    timeout: 3000,
+    autoUnref: true,
+    forceNew: true,
+    auth: { token: "bad-token", workspaceId: "workspace-1" },
+  });
+  const message = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("namespace reject: connect_error timeout")), 3000);
+    socket.on("connect", () => {
+      clearTimeout(timer);
+      reject(new Error("namespace reject: unexpectedly connected"));
+    });
+    socket.on("connect_error", (err) => {
+      clearTimeout(timer);
+      resolve(err.message);
+    });
+  });
+  if (message !== "workspace unauthorized") throw new Error(`namespace reject: bad connect_error ${message}`);
+  socket.disconnect();
+  socket.io.engine.close();
+}
+
+async function runDynamicNamespaceClient() {
+  const socket = io(`${url}/dynamic`, {
+    path: "/socket.io/",
+    transports: ["websocket"],
+    reconnection: false,
+    timeout: 3000,
+    autoUnref: true,
+    forceNew: true,
+    auth: { token: "dynamic-token", workspaceId: "workspace-1" },
+  });
+  await waitForConnect(socket, "dynamic namespace");
+  socket.disconnect();
+  socket.io.engine.close();
+}
+
+async function runReconnectClient() {
+  const socket = io(url, {
+    path: "/socket.io/",
+    transports: ["websocket"],
+    reconnection: true,
+    reconnectionAttempts: 3,
+    reconnectionDelay: 50,
+    reconnectionDelayMax: 50,
+    timeout: 3000,
+    autoUnref: true,
+    forceNew: true,
+    auth: { token: "reconnect-token", workspaceId: "workspace-reconnect" },
+  });
+
+  let connects = 0;
+  let sawTransportDisconnect = false;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`reconnect: timeout connects=${connects}`)), 5000);
+    socket.on("connect", () => {
+      connects++;
+      if (connects === 1) {
+        socket.emit("force-transport-close");
+        return;
+      }
+      socket.emit("auth-count", "reconnect-token", (count) => {
+        clearTimeout(timer);
+        if (!sawTransportDisconnect) reject(new Error("reconnect: missing transport close disconnect"));
+        else if (count < 2) reject(new Error(`reconnect: auth count ${count}`));
+        else resolve();
+      });
+    });
+    socket.on("disconnect", (reason) => {
+      if (reason === "transport close") sawTransportDisconnect = true;
+    });
+    socket.on("connect_error", reject);
+    socket.io.on("reconnect_failed", () => reject(new Error("reconnect: reconnect_failed")));
+  });
+  socket.disconnect();
+  socket.io.engine.close();
+}
+
 await runClient("websocket", { transports: ["websocket"] });
 await runRejectedClient();
-await runClient("polling", {});
+await runNamespaceClient();
+await runRejectedNamespaceClient();
+await runDynamicNamespaceClient();
+await runReconnectClient();
+if (process.env.SIO_JS_E2E_POLLING === "1") {
+  await runClient("polling", {});
+}

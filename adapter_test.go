@@ -1,6 +1,8 @@
 package sio
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,5 +48,40 @@ func TestLocalAdapterUnionExceptAndMutation(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("mutation from callback was not applied, rooms=%v", rooms)
+	}
+}
+
+func TestLocalAdapterConcurrentJoinLeaveAndApply(t *testing.T) {
+	a := newLocalAdapter()
+	const socketCount = 128
+	sockets := make([]*serverSocket, 0, socketCount)
+	for i := 0; i < socketCount; i++ {
+		s := &serverSocket{id: SocketID(fmt.Sprintf("s%d", i))}
+		a.addSocket(s)
+		sockets = append(sockets, s)
+	}
+
+	var wg sync.WaitGroup
+	for i, socket := range sockets {
+		wg.Add(1)
+		go func(i int, socket *serverSocket) {
+			defer wg.Done()
+			room := Room(fmt.Sprintf("room-%d", i%8))
+			for j := 0; j < 100; j++ {
+				a.addAll(socket.id, socket, []Room{"hot", room})
+				_ = a.apply(broadcastOptions{Rooms: []Room{"hot"}}, func(*serverSocket) {})
+				a.delete(socket.id, "hot")
+				a.delete(socket.id, room)
+			}
+		}(i, socket)
+	}
+	wg.Wait()
+
+	socketsN, _, memberships := a.stats()
+	if socketsN != socketCount {
+		t.Fatalf("sockets = %d, want %d", socketsN, socketCount)
+	}
+	if memberships != socketCount {
+		t.Fatalf("memberships = %d, want only default sid rooms %d", memberships, socketCount)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -195,6 +196,107 @@ func TestClusterConnectionStateRecoveryBroadcastPull(t *testing.T) {
 	s1.recovery.mu.Unlock()
 	if stillCached {
 		t.Fatalf("remote CSR pull did not clear owner session cache for pid %q", pid)
+	}
+}
+
+func TestConnectionStateRecoverySkipsMiddlewaresByDefault(t *testing.T) {
+	var middlewareCalls atomic.Int32
+	server := mustNewServer(t, &ServerConfig{
+		AcceptAnyNamespace: true,
+		Port:               "3000",
+		ServerConnectionStateRecovery: ServerConnectionStateRecovery{
+			Enabled:                  true,
+			MaxDisconnectionDuration: time.Minute,
+		},
+	})
+	server.Use(func(_ ServerSocket, handshake *Handshake) any {
+		middlewareCalls.Add(1)
+		if !strings.Contains(string(handshake.Auth), `"token":"good"`) {
+			return "unauthorized"
+		}
+		return nil
+	})
+	server.OnConnection(func(socket ServerSocket) { socket.Join("room") })
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+	defer func() { _ = server.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, pid := connectRecoveryClient(t, ctx, ts.URL, `{"token":"good"}`)
+	server.To("room").Emit("csr", "before")
+	offset := eventOffset(t, readSocketEvent(t, ctx, ws))
+	if err := ws.Close(websocket.StatusNormalClosure, "transport close"); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverySession(t, server, pid)
+
+	recovered, _ := connectRecoveryClient(t, ctx, ts.URL, `{"pid":"`+pid+`","offset":"`+offset+`"}`)
+	defer func() { _ = recovered.Close(websocket.StatusNormalClosure, "") }()
+	if got := middlewareCalls.Load(); got != 1 {
+		t.Fatalf("middleware calls = %d, want 1 when recovered sessions skip middlewares", got)
+	}
+}
+
+func TestConnectionStateRecoveryCanRerunMiddlewares(t *testing.T) {
+	server := mustNewServer(t, &ServerConfig{
+		AcceptAnyNamespace: true,
+		Port:               "3000",
+		ServerConnectionStateRecovery: ServerConnectionStateRecovery{
+			Enabled:                  true,
+			MaxDisconnectionDuration: time.Minute,
+			UseMiddlewares:           true,
+		},
+	})
+	server.Use(func(_ ServerSocket, handshake *Handshake) any {
+		if !strings.Contains(string(handshake.Auth), `"token":"good"`) {
+			return "unauthorized"
+		}
+		return nil
+	})
+	server.OnConnection(func(socket ServerSocket) { socket.Join("room") })
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+	defer func() { _ = server.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, pid := connectRecoveryClient(t, ctx, ts.URL, `{"token":"good"}`)
+	server.To("room").Emit("csr", "before")
+	offset := eventOffset(t, readSocketEvent(t, ctx, ws))
+	if err := ws.Close(websocket.StatusNormalClosure, "transport close"); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverySession(t, server, pid)
+
+	message := connectSocketClientExpectError(t, ctx, ts.URL, "/", `{"pid":"`+pid+`","offset":"`+offset+`"}`)
+	if message != "unauthorized" {
+		t.Fatalf("connect_error message = %q, want unauthorized", message)
+	}
+}
+
+func TestRecoveryStoreExpiresSessionsAndPackets(t *testing.T) {
+	store := newRecoveryStore(10 * time.Millisecond)
+	now := time.Now()
+	store.save("/", "pid-expire", "sid-expire", []Room{"room-expire"}, now)
+	offset := store.nextOffset()
+	packetOwner := acquireBytes(len(`42["csr","expired","1"]`))
+	packetOwner.AppendString(`42["csr","expired","1"]`)
+	store.log("/", broadcastOptions{Rooms: []Room{"room-expire"}}, offset, packetOwner.B, nil, now)
+	packetOwner.Release()
+
+	session, replay, ok := store.snapshot("/", "pid-expire", offset, now.Add(11*time.Millisecond))
+	if ok {
+		session.release()
+		releaseReplayPackets(replay)
+		t.Fatal("expired recovery session was returned")
+	}
+	store.mu.Lock()
+	sessions := len(store.sessions)
+	packets := len(store.packets)
+	store.mu.Unlock()
+	if sessions != 0 || packets != 0 {
+		t.Fatalf("expired recovery state sessions=%d packets=%d, want 0/0", sessions, packets)
 	}
 }
 

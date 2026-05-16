@@ -61,17 +61,15 @@ func main() {
 	clientB := mustConnect(ctx, "client-b", *podB, "")
 	defer clientB.close()
 
-	mustHTTP(ctx, *podA+"/debug/broadcast?event=k8s-broadcast&value=from-a")
-	clientB.waitEvent(ctx, "k8s-broadcast", "from-a")
+	mustEventuallyHTTPEvent(ctx, *podA+"/debug/broadcast?event=k8s-broadcast&value=from-a", clientB, "k8s-broadcast", "from-a")
 	printf("cross-pod broadcast ok")
 
 	clientB.emit(`42["join","k8s-room"]`)
 	time.Sleep(300 * time.Millisecond)
-	mustHTTP(ctx, *podA+"/debug/room?room=k8s-room&event=k8s-room&value=room-from-a")
-	clientB.waitEvent(ctx, "k8s-room", "room-from-a")
+	mustEventuallyHTTPEvent(ctx, *podA+"/debug/room?room=k8s-room&event=k8s-room&value=room-from-a", clientB, "k8s-room", "room-from-a")
 	printf("cross-pod room broadcast ok")
 
-	mustHTTP(ctx, *podA+"/debug/ack?event=k8s-ack&value=ack-from-a")
+	mustEventuallyHTTP(ctx, *podA+"/debug/ack?event=k8s-ack&value=ack-from-a")
 	printf("cross-pod broadcast ack ok")
 
 	csr := mustConnect(ctx, "csr-owner", *podA, "")
@@ -273,6 +271,24 @@ func (c *client) waitEvent(ctx context.Context, name, value string) event {
 	}
 }
 
+func (c *client) waitEventWithin(ctx context.Context, name, value string, timeout time.Duration) (event, bool) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		select {
+		case e := <-c.events:
+			if e.Name != name {
+				continue
+			}
+			if value == "" || contains(e.Values, value) {
+				return e, true
+			}
+		case <-ctx.Done():
+			return event{}, false
+		}
+	}
+}
+
 func (c *client) emit(packet string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -308,6 +324,54 @@ func mustHTTP(ctx context.Context, rawURL string) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		fatalf("GET %s returned %s: %s", rawURL, resp.Status, body)
 	}
+}
+
+func mustEventuallyHTTP(ctx context.Context, rawURL string) {
+	var lastErr error
+	for ctx.Err() == nil {
+		lastErr = tryHTTP(ctx, rawURL)
+		if lastErr == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	fatalf("GET %s did not succeed: %v", rawURL, lastErr)
+}
+
+func mustEventuallyHTTPEvent(ctx context.Context, rawURL string, c *client, name, value string) {
+	var lastErr error
+	for ctx.Err() == nil {
+		lastErr = tryHTTP(ctx, rawURL)
+		if lastErr == nil {
+			if _, ok := c.waitEventWithin(ctx, name, value, time.Second); ok {
+				return
+			}
+			lastErr = fmt.Errorf("event %s value %q was not delivered", name, value)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	fatalf("GET %s did not deliver %s value %q: %v", rawURL, name, value, lastErr)
+}
+
+func tryHTTP(ctx context.Context, rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parse URL %q failed: %w", rawURL, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("create request %q failed: %w", rawURL, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s failed: %w", rawURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("GET %s returned %s: %s", rawURL, resp.Status, body)
+	}
+	return nil
 }
 
 func contains(values []string, value string) bool {
