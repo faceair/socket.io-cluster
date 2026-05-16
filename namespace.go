@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+type middlewareError struct {
+	namespace string
+	value     any
+}
+
+func (e *middlewareError) Error() string {
+	return fmt.Sprintf("sio: namespace %s middleware rejected connection: %v", e.namespace, e.value)
+}
+
+func (e *middlewareError) Message() string {
+	switch v := e.value.(type) {
+	case error:
+		return v.Error()
+	case string:
+		return v
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
 type Namespace struct {
 	name    string
 	server  *Server
@@ -114,7 +134,7 @@ func (n *Namespace) add(conn *engineConn, auth json.RawMessage, reqTime time.Tim
 	if !recovered || !n.server.recoverySkipMiddlewares {
 		for _, mw := range middlewares {
 			if v := mw(socket, handshake); v != nil {
-				return nil, fmt.Errorf("sio: namespace %s middleware rejected connection: %v", n.name, v)
+				return nil, &middlewareError{namespace: n.name, value: v}
 			}
 		}
 	}

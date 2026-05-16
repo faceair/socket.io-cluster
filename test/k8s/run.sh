@@ -16,6 +16,9 @@ cd "$ROOT"
 cleanup() {
   if [[ -n "${pf_a:-}" ]]; then kill "$pf_a" 2>/dev/null || true; fi
   if [[ -n "${pf_b:-}" ]]; then kill "$pf_b" 2>/dev/null || true; fi
+  if [[ "${KEEP_K8S_E2E:-0}" != "1" ]]; then
+    kubectl delete namespace "$NS" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  fi
   if [[ -n "${manifest:-}" ]]; then rm -f "$manifest"; fi
   wait 2>/dev/null || true
 }

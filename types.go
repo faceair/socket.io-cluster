@@ -46,15 +46,28 @@ type ServerConfig struct {
 	// Port is the real HTTP listen port of this server, used to derive the
 	// cluster AdvertiseURL. It is required unless Cluster.AdvertiseURL or an
 	// equivalent port env var is set.
-	Port                    string
-	Authenticator           ServerAuthFunc
-	PingInterval            time.Duration
-	PingTimeout             time.Duration
-	ConnectTimeout          time.Duration
-	AcceptAnyNamespace      bool
-	Cluster                 ClusterConfig
-	ConnectionStateRecovery ConnectionStateRecoveryConfig
-	OnError                 func(error)
+	Port string
+
+	// Secret is required. It authenticates built-in peer-to-peer cluster POSTs.
+	// All nodes in the same deployment must use the same non-empty value.
+	Secret string
+
+	// EIO mirrors karagenc/socket.io-go's Engine.IO configuration surface for
+	// request-level authentication and heartbeat tuning. Namespace auth should
+	// use Namespace.Use/Server.Use and Handshake.Auth.
+	EIO EngineIOConfig
+
+	ConnectTimeout                time.Duration
+	AcceptAnyNamespace            bool
+	Cluster                       ClusterConfig
+	ServerConnectionStateRecovery ServerConnectionStateRecovery
+	OnError                       func(error)
+}
+
+type EngineIOConfig struct {
+	Authenticator ServerAuthFunc
+	PingInterval  time.Duration
+	PingTimeout   time.Duration
 }
 
 type ClusterConfig struct {
@@ -75,10 +88,12 @@ type ClusterConfig struct {
 	FanoutWorkers     int
 }
 
-type ConnectionStateRecoveryConfig struct {
-	Enabled                    bool
-	MaxDisconnectionDuration   time.Duration
-	SkipMiddlewaresOnReconnect bool
+type ServerConnectionStateRecovery struct {
+	Enabled                  bool
+	MaxDisconnectionDuration time.Duration
+	// UseMiddlewares matches karagenc/socket.io-go: false means recovered
+	// sessions skip namespace middlewares, true means they run again.
+	UseMiddlewares bool
 }
 
 type Handshake struct {

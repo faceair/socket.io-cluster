@@ -18,7 +18,7 @@ func TestConnectionStateRecoveryReplaysMissedBroadcast(t *testing.T) {
 	server := mustNewServer(t, &ServerConfig{
 		AcceptAnyNamespace: true,
 		Port:               "3000",
-		ConnectionStateRecovery: ConnectionStateRecoveryConfig{
+		ServerConnectionStateRecovery: ServerConnectionStateRecovery{
 			Enabled:                  true,
 			MaxDisconnectionDuration: time.Minute,
 		},
@@ -142,14 +142,14 @@ func TestClusterConnectionStateRecoveryBroadcastPull(t *testing.T) {
 	_ = ln2.Close()
 
 	config1 := &ServerConfig{
-		AcceptAnyNamespace:      true,
-		Cluster:                 ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}},
-		ConnectionStateRecovery: ConnectionStateRecoveryConfig{Enabled: true, MaxDisconnectionDuration: time.Minute},
+		AcceptAnyNamespace:            true,
+		Cluster:                       ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}},
+		ServerConnectionStateRecovery: ServerConnectionStateRecovery{Enabled: true, MaxDisconnectionDuration: time.Minute},
 	}
 	config2 := &ServerConfig{
-		AcceptAnyNamespace:      true,
-		Cluster:                 ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}},
-		ConnectionStateRecovery: ConnectionStateRecoveryConfig{Enabled: true, MaxDisconnectionDuration: time.Minute},
+		AcceptAnyNamespace:            true,
+		Cluster:                       ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}},
+		ServerConnectionStateRecovery: ServerConnectionStateRecovery{Enabled: true, MaxDisconnectionDuration: time.Minute},
 	}
 	s1 := mustNewServer(t, config1)
 	s2 := mustNewServer(t, config2)

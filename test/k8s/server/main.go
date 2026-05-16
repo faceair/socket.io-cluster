@@ -19,19 +19,20 @@ type debugServer struct {
 
 func main() {
 	port := getenv("PORT", "3000")
-	server, err := sio.NewServer(&sio.ServerConfig{
+	server := sio.NewServer(&sio.ServerConfig{
 		Port:               port,
+		Secret:             getenv("SIO_CLUSTER_SECRET", "k8s-e2e-secret"),
 		AcceptAnyNamespace: true,
 		Cluster: sio.ClusterConfig{
 			HeartbeatInterval: time.Second,
 		},
-		ConnectionStateRecovery: sio.ConnectionStateRecoveryConfig{
+		ServerConnectionStateRecovery: sio.ServerConnectionStateRecovery{
 			Enabled:                  true,
 			MaxDisconnectionDuration: 2 * time.Minute,
 		},
 		OnError: func(err error) { log.Println("socket.io error:", err) },
 	})
-	if err != nil {
+	if err := server.Run(); err != nil {
 		log.Fatal(err)
 	}
 	defer func() { _ = server.Close() }()

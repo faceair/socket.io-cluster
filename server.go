@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,7 @@ type Server struct {
 	connectTimeout          time.Duration
 	onError                 func(error)
 	recoverySkipMiddlewares bool
+	initErr                 error
 
 	ids      *idGenerator
 	lc       *lifecycle
@@ -40,9 +42,12 @@ type Server struct {
 	cluster     *clusterNode
 	anyConn     callbackStore[ServerAnyConnectionFunc]
 	newNspHooks callbackStore[ServerNewNamespaceFunc]
+	runOnce     sync.Once
+	runErr      error
+	running     atomic.Bool
 }
 
-func NewServer(config *ServerConfig) (*Server, error) {
+func NewServer(config *ServerConfig) *Server {
 	if config == nil {
 		config = new(ServerConfig)
 	}
@@ -56,12 +61,12 @@ func NewServer(config *ServerConfig) (*Server, error) {
 	s := &Server{
 		path:                    path,
 		acceptAnyNsp:            config.AcceptAnyNamespace,
-		authenticator:           config.Authenticator,
-		pingInterval:            cmp.Or(config.PingInterval, DefaultPingInterval),
-		pingTimeout:             cmp.Or(config.PingTimeout, DefaultPingTimeout),
+		authenticator:           config.EIO.Authenticator,
+		pingInterval:            cmp.Or(config.EIO.PingInterval, DefaultPingInterval),
+		pingTimeout:             cmp.Or(config.EIO.PingTimeout, DefaultPingTimeout),
 		connectTimeout:          cmp.Or(config.ConnectTimeout, DefaultConnectTimeout),
 		onError:                 config.OnError,
-		recoverySkipMiddlewares: config.ConnectionStateRecovery.SkipMiddlewaresOnReconnect,
+		recoverySkipMiddlewares: !config.ServerConnectionStateRecovery.UseMiddlewares,
 		ids:                     newIDGenerator(resolveNodeID(config.Cluster.NodeID)),
 		lc:                      newLifecycle(context.Background()),
 		metrics:                 newMetricsRecorder(),
@@ -69,25 +74,22 @@ func NewServer(config *ServerConfig) (*Server, error) {
 		conns:                   make(map[string]*engineConn),
 		broadcasts:              make(map[uint64]*broadcastAckTracker),
 	}
-	if config.ConnectionStateRecovery.Enabled {
-		s.recovery = newRecoveryStore(cmp.Or(config.ConnectionStateRecovery.MaxDisconnectionDuration, 2*time.Minute))
+	if config.ServerConnectionStateRecovery.Enabled {
+		s.recovery = newRecoveryStore(cmp.Or(config.ServerConnectionStateRecovery.MaxDisconnectionDuration, 2*time.Minute))
 	}
 	s.namespaces["/"] = newNamespace("/", s)
-	cluster, err := newClusterNode(s, config.Port, config.Cluster)
+	cluster, err := newClusterNode(s, config.Port, config.Secret, config.Cluster)
 	if err != nil {
-		return nil, err
+		s.initErr = err
+	} else {
+		s.cluster = cluster
 	}
-	s.cluster = cluster
-	if s.recovery != nil {
-		s.lc.start("recovery-sweeper", s.recoverySweepLoop)
-	}
-	s.lc.start("ack-sweeper", s.ackSweepLoop)
-	return s, nil
+	return s
 }
 
 func MustNewServer(config *ServerConfig) *Server {
-	s, err := NewServer(config)
-	if err != nil {
+	s := NewServer(config)
+	if err := s.Run(); err != nil {
 		panic(err)
 	}
 	return s
@@ -136,7 +138,41 @@ func (s *Server) OnServerSideEmit(eventName string, handler any) {
 func (s *Server) OnAnyConnection(f ServerAnyConnectionFunc) { s.anyConn.add(f, false) }
 func (s *Server) OnNewNamespace(f ServerNewNamespaceFunc)   { s.newNspHooks.add(f, false) }
 
-func (s *Server) Run() error { return nil }
+func (s *Server) Run() error {
+	s.runOnce.Do(func() {
+		if s.IsClosed() {
+			s.runErr = fmt.Errorf("sio: server is closed. a socket.io server cannot be restarted")
+			return
+		}
+		if s.initErr != nil {
+			s.runErr = s.initErr
+			return
+		}
+		if s.pingInterval < time.Second {
+			s.runErr = fmt.Errorf("sio: EIO.PingInterval must be at least 1s")
+			return
+		}
+		if s.pingTimeout < time.Second {
+			s.runErr = fmt.Errorf("sio: EIO.PingTimeout must be at least 1s")
+			return
+		}
+		if s.recovery != nil {
+			s.lc.start("recovery-sweeper", s.recoverySweepLoop)
+		}
+		s.lc.start("ack-sweeper", s.ackSweepLoop)
+		if s.cluster != nil {
+			s.cluster.start()
+		}
+		s.running.Store(true)
+	})
+	return s.runErr
+}
+
+func (s *Server) PollTimeout() time.Duration { return s.pingInterval + s.pingTimeout }
+
+func (s *Server) HTTPWriteTimeout() time.Duration { return s.PollTimeout() + 10*time.Second }
+
+func (s *Server) IsClosed() bool { return s.lc.context().Err() != nil }
 
 func (s *Server) Close() error {
 	s.mu.RLock()
@@ -151,12 +187,34 @@ func (s *Server) Close() error {
 	if s.cluster != nil {
 		s.cluster.close()
 	}
-	return s.lc.stop(5 * time.Second)
+	err := s.lc.stop(5 * time.Second)
+	s.running.Store(false)
+	return err
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.running.Load() {
+		if s.IsClosed() {
+			http.Error(w, "sio: server is closed", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "sio: server is not running; call Run before ServeHTTP", http.StatusServiceUnavailable)
+		return
+	}
 	if !strings.HasPrefix(r.URL.Path, strings.TrimSuffix(s.path, "/")) {
 		http.NotFound(w, r)
+		return
+	}
+	transport := r.URL.Query().Get("transport")
+	if transport == "cluster" {
+		if s.cluster == nil {
+			if s.initErr != nil {
+				s.reportError(s.initErr)
+			}
+			writeEngineError(w, 3, "Cluster unavailable")
+			return
+		}
+		s.cluster.serveHTTP(w, r)
 		return
 	}
 	if s.authenticator != nil && !s.authenticator(w, r) {
@@ -164,11 +222,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(forbiddenBodyBytes)
 		return
 	}
-	if s.cluster != nil && r.URL.Query().Get("transport") == "cluster" {
-		s.cluster.serveHTTP(w, r)
-		return
-	}
-	transport := r.URL.Query().Get("transport")
 	switch transport {
 	case "websocket":
 		s.serveWebSocket(w, r)

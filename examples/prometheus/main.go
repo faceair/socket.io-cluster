@@ -35,12 +35,13 @@ func (c sioCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func main() {
-	server, err := sio.NewServer(&sio.ServerConfig{
+	server := sio.NewServer(&sio.ServerConfig{
 		AcceptAnyNamespace: true,
 		Port:               "3000",
+		Secret:             "prometheus-example-secret",
 		OnError:            func(err error) { log.Println(err) },
 	})
-	if err != nil {
+	if err := server.Run(); err != nil {
 		log.Fatal(err)
 	}
 	defer func() { _ = server.Close() }()

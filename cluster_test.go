@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +27,8 @@ func TestClusterBroadcastFanout(t *testing.T) {
 	addr2 := ln2.Addr().String()
 	_ = ln2.Close()
 
-	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
-	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
+	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
+	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
 	http1 := &http.Server{Handler: s1}
 	http2 := &http.Server{Handler: s2}
 	l1, err := net.Listen("tcp", addr1)
@@ -64,8 +65,8 @@ func TestClusterSocketsJoinThenRoomBroadcast(t *testing.T) {
 	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr2 := ln2.Addr().String()
 	_ = ln2.Close()
-	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
-	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
+	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
+	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
 	http1 := &http.Server{Handler: s1}
 	http2 := &http.Server{Handler: s2}
 	l1, err := net.Listen("tcp", addr1)
@@ -152,8 +153,8 @@ func TestClusterBroadcastAck(t *testing.T) {
 	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr2 := ln2.Addr().String()
 	_ = ln2.Close()
-	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
-	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
+	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
+	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
 	http1 := &http.Server{Handler: s1}
 	http2 := &http.Server{Handler: s2}
 	l1, err := net.Listen("tcp", addr1)
@@ -214,8 +215,8 @@ func TestClusterFetchSocketsAndServerSideEmit(t *testing.T) {
 	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr2 := ln2.Addr().String()
 	_ = ln2.Close()
-	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
-	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
+	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
+	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: "test-secret", Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
 	http1 := &http.Server{Handler: s1}
 	http2 := &http.Server{Handler: s2}
 	l1, err := net.Listen("tcp", addr1)
@@ -264,5 +265,81 @@ func TestClusterFetchSocketsAndServerSideEmit(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("serverSideEmit timeout")
+	}
+}
+
+func TestClusterPeerSecretProtectsTransportAndBypassesEIOAuthenticator(t *testing.T) {
+	s := mustNewServer(t, &ServerConfig{
+		Port:    "3000",
+		Secret:  "shared-secret",
+		EIO:     EngineIOConfig{Authenticator: func(http.ResponseWriter, *http.Request) bool { return false }},
+		Cluster: ClusterConfig{},
+	})
+	defer func() { _ = s.Close() }()
+
+	for name, secret := range map[string]string{"missing": "", "wrong": "bad-secret"} {
+		req := httptest.NewRequest(http.MethodPost, "/socket.io/?transport=cluster&op=fetch&nsp=/", nil)
+		if secret != "" {
+			req.Header.Set(clusterSecretHeader, secret)
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s secret status=%d body=%q", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/socket.io/?transport=cluster&op=fetch&nsp=/", nil)
+	req.Header.Set(clusterSecretHeader, "shared-secret")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid secret status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClusterBroadcastFanoutWithPeerSecret(t *testing.T) {
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr1 := ln1.Addr().String()
+	_ = ln1.Close()
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr2 := ln2.Addr().String()
+	_ = ln2.Close()
+
+	secret := "shared-secret"
+	s1 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: secret, Cluster: ClusterConfig{NodeID: "n1", AdvertiseURL: "http://" + addr1, Peers: []string{"http://" + addr2 + DefaultPath + "?transport=cluster"}}})
+	s2 := mustNewServer(t, &ServerConfig{AcceptAnyNamespace: true, Secret: secret, Cluster: ClusterConfig{NodeID: "n2", AdvertiseURL: "http://" + addr2, Peers: []string{"http://" + addr1 + DefaultPath + "?transport=cluster"}}})
+	http1 := &http.Server{Handler: s1}
+	http2 := &http.Server{Handler: s2}
+	l1, err := net.Listen("tcp", addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2, err := net.Listen("tcp", addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = http1.Serve(l1) }()
+	go func() { _ = http2.Serve(l2) }()
+	defer func() { _ = http1.Shutdown(context.Background()) }()
+	defer func() { _ = http2.Shutdown(context.Background()) }()
+	defer func() { _ = s1.Close() }()
+	defer func() { _ = s2.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws := connectSocketClient(t, ctx, "http://"+addr2)
+	defer func() { _ = ws.Close(websocket.StatusNormalClosure, "") }()
+
+	s1.Emit("secret-cluster-event", "ok")
+	packet := readSocketEvent(t, ctx, ws)
+	if !strings.Contains(packet, `"secret-cluster-event"`) || !strings.Contains(packet, `"ok"`) {
+		t.Fatalf("unexpected cluster packet %q", packet)
 	}
 }

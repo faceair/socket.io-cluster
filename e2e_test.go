@@ -2,6 +2,8 @@ package sio
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -17,7 +19,21 @@ func TestSocketIOClientE2E(t *testing.T) {
 	server := mustNewServer(t, &ServerConfig{
 		AcceptAnyNamespace: true,
 		Port:               "3000",
+		Secret:             "test-secret",
 		OnError:            func(err error) { t.Log(err) },
+	})
+	server.Use(func(_ ServerSocket, handshake *Handshake) any {
+		var auth struct {
+			Token       string `json:"token"`
+			WorkspaceID string `json:"workspaceId"`
+		}
+		if err := json.Unmarshal(handshake.Auth, &auth); err != nil {
+			return err
+		}
+		if auth.Token != "good-token" || auth.WorkspaceID != "workspace-1" {
+			return errors.New("unauthorized")
+		}
+		return nil
 	})
 	server.OnConnection(func(socket ServerSocket) {
 		socket.OnEvent("client-event", func(name string, ack func(string)) {

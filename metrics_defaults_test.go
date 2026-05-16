@@ -26,6 +26,7 @@ func TestDefaultClusterNodeIDUsesPodName(t *testing.T) {
 		t.Fatalf("request timeout = %s, want 2s", s.cluster.requestTimeout)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/socket.io/?transport=cluster&op=fetch&nsp=/", nil)
+	req.Header.Set(clusterSecretHeader, "test-secret")
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -48,6 +49,19 @@ func TestClusterDefaultsFromEnvironment(t *testing.T) {
 	}
 	if s.cluster.advertiseURL != "http://10.0.0.9:8080" {
 		t.Fatalf("advertiseURL=%q", s.cluster.advertiseURL)
+	}
+}
+
+func TestRunRequiresServerSecret(t *testing.T) {
+	clearClusterEnv(t)
+	server := NewServer(&ServerConfig{Port: "3000"})
+	defer func() { _ = server.Close() }()
+	err := server.Run()
+	if err == nil {
+		t.Fatal("expected missing ServerConfig.Secret error")
+	}
+	if !strings.Contains(err.Error(), "ServerConfig.Secret is required") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -116,10 +130,12 @@ func TestClusterInfersHeadlessDNSFromDeploymentPodName(t *testing.T) {
 	}
 }
 
-func TestNewServerRequiresClusterPortOrAdvertiseURL(t *testing.T) {
+func TestRunRequiresClusterPortOrAdvertiseURL(t *testing.T) {
 	clearClusterEnv(t)
 	t.Setenv("POD_IP", "10.0.0.9")
-	_, err := NewServer(nil)
+	server := NewServer(&ServerConfig{Secret: "test-secret"})
+	defer func() { _ = server.Close() }()
+	err := server.Run()
 	if err == nil {
 		t.Fatal("expected missing cluster port error")
 	}
@@ -181,5 +197,35 @@ func clearClusterEnv(t *testing.T) {
 		"SOCKETIO_CLUSTER_SCHEME",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestServeHTTPRequiresRun(t *testing.T) {
+	clearClusterEnv(t)
+	s := NewServer(&ServerConfig{Port: "3000", Secret: "test-secret"})
+	defer func() { _ = s.Close() }()
+	req := httptest.NewRequest(http.MethodGet, "/socket.io/?EIO=4&transport=polling", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "call Run") {
+		t.Fatalf("unexpected body %q", rec.Body.String())
+	}
+}
+
+func TestRunAfterCloseFails(t *testing.T) {
+	clearClusterEnv(t)
+	s := NewServer(&ServerConfig{Port: "3000", Secret: "test-secret"})
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := s.Run()
+	if err == nil {
+		t.Fatal("expected Run after Close error")
+	}
+	if !strings.Contains(err.Error(), "cannot be restarted") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -412,7 +413,11 @@ func (c *engineConn) handleParsedSocketPacket(p PacketView) error {
 			return nil
 		}
 		_, err := n.add(c, p.Payload, time.Now())
-		return err
+		if err != nil {
+			c.sendConnectError(nsp, err)
+			return nil
+		}
+		return nil
 	}
 	if p.Type == PacketAck || p.Type == PacketBinaryAck {
 		if p.HasID {
@@ -433,6 +438,21 @@ func (c *engineConn) handleParsedSocketPacket(p PacketView) error {
 	}
 	socket.onPacket(p)
 	return nil
+}
+
+func (c *engineConn) sendConnectError(namespace string, err error) {
+	message := err.Error()
+	var middlewareErr *middlewareError
+	if ok := errors.As(err, &middlewareErr); ok {
+		message = middlewareErr.Message()
+	}
+	payload := acquireBytes(len(namespace) + len(message)*6 + 24)
+	payload.B = appendPacketHeaderString(payload.B, PacketConnectError, 0, namespace, 0, false)
+	payload.AppendString(`{"message":`)
+	payload.AppendQuote(message)
+	payload.AppendByte('}')
+	c.sendSocketPacket(payload.B)
+	payload.Release()
 }
 
 func (c *engineConn) addSocket(socket *serverSocket) {

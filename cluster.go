@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -15,21 +16,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type clusterNode struct {
-	server         *Server
-	nodeID         string
-	advertiseURL   string
-	path           string
-	mu             sync.RWMutex
-	peers          []string
-	dnsNames       []string
-	client         *http.Client
-	requestTimeout time.Duration
-	jobs           chan clusterJob
-	workerCount    int
+	server            *Server
+	nodeID            string
+	advertiseURL      string
+	path              string
+	secret            string
+	mu                sync.RWMutex
+	peers             []string
+	dnsNames          []string
+	client            *http.Client
+	requestTimeout    time.Duration
+	heartbeatInterval time.Duration
+	jobs              chan clusterJob
+	workerCount       int
+	started           atomic.Bool
 }
 
 type socketSnapshot struct {
@@ -51,26 +56,37 @@ type clusterPacketBody struct {
 	packet      []byte
 }
 
-func newClusterNode(server *Server, port string, config ClusterConfig) (*clusterNode, error) {
+const (
+	clusterOriginHeader = "X-Sio-Origin"
+	clusterSecretHeader = "X-Sio-Cluster-Secret"
+)
+
+func newClusterNode(server *Server, port string, secret string, config ClusterConfig) (*clusterNode, error) {
 	path := server.path
 	nodeID := config.NodeID
 	if nodeID == "" {
 		nodeID = server.ids.node
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return nil, fmt.Errorf("sio: ServerConfig.Secret is required for cluster peer authentication")
 	}
 	advertiseURL, err := defaultAdvertiseURL(port, config)
 	if err != nil {
 		return nil, err
 	}
 	c := &clusterNode{
-		server:         server,
-		nodeID:         nodeID,
-		advertiseURL:   strings.TrimRight(advertiseURL, "/"),
-		path:           path,
-		peers:          normalizePeers(defaultPeers(config.Peers), path),
-		dnsNames:       defaultHeadlessDNS(config.HeadlessDNS),
-		client:         &http.Client{Timeout: cmp.Or(config.RequestTimeout, 2*time.Second)},
-		requestTimeout: cmp.Or(config.RequestTimeout, 2*time.Second),
-		workerCount:    cmp.Or(config.FanoutWorkers, 8),
+		server:            server,
+		nodeID:            nodeID,
+		advertiseURL:      strings.TrimRight(advertiseURL, "/"),
+		path:              path,
+		secret:            secret,
+		peers:             normalizePeers(defaultPeers(config.Peers), path),
+		dnsNames:          defaultHeadlessDNS(config.HeadlessDNS),
+		client:            &http.Client{Timeout: cmp.Or(config.RequestTimeout, 2*time.Second)},
+		requestTimeout:    cmp.Or(config.RequestTimeout, 2*time.Second),
+		heartbeatInterval: cmp.Or(config.HeartbeatInterval, 30*time.Second),
+		workerCount:       cmp.Or(config.FanoutWorkers, 8),
 	}
 	if c.workerCount < 1 {
 		c.workerCount = 1
@@ -78,13 +94,22 @@ func newClusterNode(server *Server, port string, config ClusterConfig) (*cluster
 	c.refreshDNSPeers()
 	if len(c.peers) != 0 || len(c.dnsNames) != 0 {
 		c.jobs = make(chan clusterJob, c.workerCount*4)
+	}
+	return c, nil
+}
+
+func (c *clusterNode) start() {
+	if !c.started.CompareAndSwap(false, true) {
+		return
+	}
+	if c.jobs != nil {
 		for i := 0; i < c.workerCount; i++ {
-			server.lc.start(fmt.Sprintf("cluster-fanout-%d", i), c.runFanoutWorker)
+			c.server.lc.start(fmt.Sprintf("cluster-fanout-%d", i), c.runFanoutWorker)
 		}
 	}
 	if len(c.dnsNames) != 0 {
-		interval := cmp.Or(config.HeartbeatInterval, 30*time.Second)
-		server.lc.start("cluster-dns-refresh", func(ctx context.Context) {
+		interval := c.heartbeatInterval
+		c.server.lc.start("cluster-dns-refresh", func(ctx context.Context) {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
@@ -97,7 +122,6 @@ func newClusterNode(server *Server, port string, config ClusterConfig) (*cluster
 			}
 		})
 	}
-	return c, nil
 }
 
 func resolveNodeID(configured string) string {
@@ -460,7 +484,11 @@ func (c *clusterNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.server.metrics.clusterRequestsReceived.Add(1)
-	if r.Header.Get("X-Sio-Origin") == c.nodeID {
+	if !c.validSecret(r.Header.Get(clusterSecretHeader)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if r.Header.Get(clusterOriginHeader) == c.nodeID {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -489,7 +517,7 @@ func (c *clusterNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		c.logRemoteRecoveryPacket(nsp.name, opts, body.packet, body.Attachments())
 		count := nsp.adapter.apply(opts, func(s *serverSocket) {
 			if ackID != 0 && origin != "" {
-				s.conn.registerBroadcastAck(ackID, &remoteAckForwarder{client: c.client, origin: origin, id: ackID})
+				s.conn.registerBroadcastAck(ackID, &remoteAckForwarder{client: c.client, origin: origin, id: ackID, nodeID: c.nodeID, secret: c.secret})
 			}
 			s.conn.sendSocketPayload(body.packet, body.Attachments())
 		})
@@ -1030,7 +1058,7 @@ func (c *clusterNode) postToPeers(op, namespace string, opts broadcastOptions, e
 			}
 		}
 		endpoint := appendClusterQuery(peer, q)
-		if c.jobs == nil {
+		if c.jobs == nil || !c.started.Load() {
 			if response, ok := c.doPost(op, peer, endpoint, body); ok {
 				responses = append(responses, response)
 			}
@@ -1076,13 +1104,27 @@ func (c *clusterNode) runFanoutWorker(ctx context.Context) {
 	}
 }
 
+func (c *clusterNode) validSecret(got string) bool {
+	if c.secret == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(c.secret)) == 1
+}
+
+func (c *clusterNode) setClusterHeaders(req *http.Request) {
+	req.Header.Set(clusterOriginHeader, c.nodeID)
+	if c.secret != "" {
+		req.Header.Set(clusterSecretHeader, c.secret)
+	}
+}
+
 func (c *clusterNode) doPost(op, peer, endpoint string, body []byte) (clusterResponse, bool) {
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		c.server.reportError(fmt.Errorf("sio cluster: create %s request to %s failed: %w", op, peer, err))
 		return clusterResponse{}, false
 	}
-	req.Header.Set("X-Sio-Origin", c.nodeID)
+	c.setClusterHeaders(req)
 	c.server.metrics.clusterRequestsSent.Add(1)
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -1116,6 +1158,8 @@ type remoteAckForwarder struct {
 	client *http.Client
 	origin string
 	id     uint64
+	nodeID string
+	secret string
 }
 
 func (f *remoteAckForwarder) accept(args JSONArrayView, _ [][]byte) {
@@ -1127,6 +1171,10 @@ func (f *remoteAckForwarder) accept(args JSONArrayView, _ [][]byte) {
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return
+	}
+	req.Header.Set(clusterOriginHeader, f.nodeID)
+	if f.secret != "" {
+		req.Header.Set(clusterSecretHeader, f.secret)
 	}
 	resp, err := f.client.Do(req)
 	if err == nil {
