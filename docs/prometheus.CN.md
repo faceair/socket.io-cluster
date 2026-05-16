@@ -47,8 +47,8 @@ func (c sioCollector) Collect(ch chan<- prometheus.Metric) {
 和 Socket.IO server 一起注册：
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
-if err != nil {
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
     log.Fatal(err)
 }
 

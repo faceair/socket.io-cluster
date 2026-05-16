@@ -25,7 +25,7 @@ go get github.com/faceair/socket.io-cluster
 
 ## 快速开始
 
-`ServerConfig.Port` 必须和当前进程真实监听的 HTTP 端口一致。库不会替你监听端口；这个值用于生成其他集群节点访问当前节点的地址。
+`ServerConfig.Port` 必须和当前进程真实监听的 HTTP 端口一致。库不会替你监听端口；这个值用于生成其他集群节点访问当前节点的地址。请在对外提供 HTTP 服务前调用 `server.Run()`；它会校验配置，并启动 ACK 清理、CSR 清理、cluster fanout workers 等由 server 持有的后台任务。
 
 ```go
 package main
@@ -33,17 +33,19 @@ package main
 import (
     "log"
     "net/http"
+    "os"
 
     sio "github.com/faceair/socket.io-cluster"
 )
 
 func main() {
-    server, err := sio.NewServer(&sio.ServerConfig{
+    server := sio.NewServer(&sio.ServerConfig{
         Port:               "3000",
+        Secret:             os.Getenv("SIO_CLUSTER_SECRET"),
         AcceptAnyNamespace: true,
         OnError:            func(err error) { log.Println(err) },
     })
-    if err != nil {
+    if err := server.Run(); err != nil {
         log.Fatal(err)
     }
     defer func() { _ = server.Close() }()
@@ -66,30 +68,59 @@ Socket.IO JavaScript client v4.x 可以正常连接：
 ```js
 import { io } from "socket.io-client";
 
-const socket = io("http://localhost:3000", { transports: ["websocket"] });
+const socket = io("http://localhost:3000", {
+  path: "/socket.io/",
+  transports: ["websocket"],
+  auth: { token, workspaceId },
+});
 
 socket.emit("hello", "alice", (reply) => {
   console.log(reply); // "hello alice"
 });
 ```
 
+## Handshake auth 和 namespace middleware
+
+Socket.IO client 的 `auth` 应在 namespace middleware 中读取 `handshake.Auth` 验证。middleware 返回非 nil 时会拒绝 namespace connection，JavaScript client 会收到 `connect_error`。
+
+```go
+server.Use(func(socket sio.ServerSocket, handshake *sio.Handshake) any {
+    var auth struct {
+        Token       string `json:"token"`
+        WorkspaceID string `json:"workspaceId"`
+    }
+    if err := json.Unmarshal(handshake.Auth, &auth); err != nil {
+        return err
+    }
+    if !validToken(auth.Token, auth.WorkspaceID) {
+        return errors.New("unauthorized")
+    }
+    return nil
+})
+```
+
+`EIO.Authenticator` 只建议用于 Engine.IO handshake 前的 request-level 检查，例如固定内部 header 或 IP allowlist。
+
 ## 配置概览
 
 ### 必配项
 
-必须提供以下任意一种：
+必须提供 `ServerConfig.Secret`，并提供下面任意一种地址来源：
 
+- `ServerConfig.Secret`：非空 shared secret，用于认证内置 cluster 通道上的 peer POST。
 - `ServerConfig.Port`，例如进程监听 `:3000` 时传 `"3000"`。
 - 完整的 `Cluster.AdvertiseURL`，例如 `"http://10.0.0.9:3000"`。
 - 通过环境变量提供端口：`SIO_CLUSTER_PORT`、`SOCKETIO_CLUSTER_PORT`、`SOCKETIO_PORT`、`PORT`、`HTTP_PORT` 或 Kubernetes `<SERVICE>_SERVICE_PORT`。
 
-如果既没有端口，也没有完整的 advertise URL，`NewServer` 会返回错误。
+如果 secret 为空，或者既没有端口也没有完整 advertise URL，`server.Run()` 会返回错误。
 
 ### 选配项
 
 | 配置 | 作用 | 默认值 |
 | --- | --- | --- |
 | `Path` | Socket.IO endpoint path | `/socket.io/` |
+| `EIO.Authenticator` | Engine.IO handshake 前的 request-level 认证 | nil |
+| `EIO.PingInterval` / `EIO.PingTimeout` | Engine.IO heartbeat 配置 | `25s` / `20s` |
 | `Cluster.NodeID` | 稳定节点身份 | `POD_NAME`、`HOSTNAME`、`os.Hostname()`，最后随机生成 |
 | `Cluster.AdvertiseURL` | peers 访问当前节点的完整 URL | 由 host + port 自动拼接 |
 | `Cluster.Peers` | 静态 peer endpoints | `SIO_CLUSTER_PEERS`、`SOCKETIO_CLUSTER_PEERS` |
@@ -103,17 +134,24 @@ socket.emit("hello", "alice", (reply) => {
 多数部署只需要配置 `Port`：
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 如果 peers 需要通过不同的 host 或 scheme 访问当前节点，可以直接配置 `AdvertiseURL`：
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{
+server := sio.NewServer(&sio.ServerConfig{
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
     Cluster: sio.ClusterConfig{
         AdvertiseURL: "https://socket-0.example.internal:443",
     },
 })
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 配置 `AdvertiseURL` 时必须包含 scheme、host 和 port。
@@ -180,19 +218,23 @@ server.To("leaving").DisconnectSockets(false)
 
 ## 集群配置
 
-cluster 默认开启，control transport 总是挂在正常 Socket.IO path 下，并通过 `transport=cluster` 访问。最小配置只需要提供 server 端口：
+cluster 默认开启，control transport 总是挂在正常 Socket.IO path 下，并通过 `transport=cluster` 访问。最小配置需要提供 server 端口和 shared secret：
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
-单节点使用不需要配置 `ClusterConfig`。如果要连接其他节点，只需要增加一种发现来源：静态 peers、`SIO_CLUSTER_PEERS`、`Cluster.HeadlessDNS`、`SIO_CLUSTER_HEADLESS_DNS`，或 Kubernetes service 名。没有配置 peers 或 DNS discovery 时，server 会以单节点方式运行，不会向远端投递。
+单节点使用不需要配置 `ClusterConfig`，但仍必须配置 `ServerConfig.Secret`，因为 cluster control endpoint 默认挂载。如果要连接其他节点，只需要增加一种发现来源：静态 peers、`SIO_CLUSTER_PEERS`、`Cluster.HeadlessDNS`、`SIO_CLUSTER_HEADLESS_DNS`，或 Kubernetes service 名。没有配置 peers 或 DNS discovery 时，server 会以单节点方式运行，不会向远端投递。
 
 ### 静态 peers
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{
+server := sio.NewServer(&sio.ServerConfig{
     Port: "3000",
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
     Cluster: sio.ClusterConfig{
         NodeID: "socket-a",
         Peers: []string{
@@ -201,9 +243,28 @@ server, err := sio.NewServer(&sio.ServerConfig{
         },
     },
 })
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 也可以通过 `SIO_CLUSTER_PEERS` 或 `SOCKETIO_CLUSTER_PEERS` 传入逗号分隔的 peer 列表。
+
+### Peer 认证
+
+生产环境建议所有 pod 配置同一个 cluster secret。peer POST 会携带 `X-Sio-Cluster-Secret`，缺失或错误 secret 的请求会在执行 cluster operation 前被拒绝。
+
+```go
+server := sio.NewServer(&sio.ServerConfig{
+    Port: "3000",
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
+})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
+```
+
+库不会生成默认 secret。常见写法是 `Secret: os.Getenv("SIO_CLUSTER_SECRET")`；如果这个环境变量为空，`server.Run()` 会 fail fast。
 
 ### Kubernetes headless DNS
 
@@ -233,7 +294,10 @@ env:
 应用代码保持简单，并在代码里传入真实监听端口：
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 推断出的 service 名会解析 `<service>.<namespace>.svc`，每个解析出的 IP 都会成为一个 peer endpoint。只有 service 名无法从 pod 名推断，或者 service 名和 workload 名不一致时，才需要设置 `SIO_CLUSTER_SERVICE`。如果使用静态 peers，或直接配置 `Cluster.HeadlessDNS` / `SIO_CLUSTER_HEADLESS_DNS`，也可以不配它。不需要 Kubernetes API watch 或 RBAC 权限。
@@ -243,14 +307,18 @@ server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
 如果希望客户端重连后保留 room membership 并补收错过的 broadcast，可以启用 CSR：
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{
+server := sio.NewServer(&sio.ServerConfig{
     Port: "3000",
-    ConnectionStateRecovery: sio.ConnectionStateRecoveryConfig{
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
+    ServerConnectionStateRecovery: sio.ServerConnectionStateRecovery{
         Enabled:                  true,
         MaxDisconnectionDuration: time.Minute,
-        SkipMiddlewaresOnReconnect: true,
+        UseMiddlewares:           false,
     },
 })
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 客户端重连到同一节点时，server 会恢复 session 并重放错过的 broadcast。客户端重连到其他节点时，该节点会向 peers 查询恢复状态。如果没有 peer 仍保存该状态，连接会退化为普通新连接。

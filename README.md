@@ -25,7 +25,7 @@ go get github.com/faceair/socket.io-cluster
 
 ## Quick start
 
-`ServerConfig.Port` must match the real HTTP listening port. The library does not bind the port for you; it uses this value to build the address other cluster nodes should call.
+`ServerConfig.Port` must match the real HTTP listening port. The library does not bind the port for you; it uses this value to build the address other cluster nodes should call. Call `server.Run()` before serving HTTP traffic; it validates configuration and starts owned background tasks such as ACK cleanup, CSR cleanup, and cluster fanout workers.
 
 ```go
 package main
@@ -33,17 +33,19 @@ package main
 import (
     "log"
     "net/http"
+    "os"
 
     sio "github.com/faceair/socket.io-cluster"
 )
 
 func main() {
-    server, err := sio.NewServer(&sio.ServerConfig{
+    server := sio.NewServer(&sio.ServerConfig{
         Port:               "3000",
+        Secret:             os.Getenv("SIO_CLUSTER_SECRET"),
         AcceptAnyNamespace: true,
         OnError:            func(err error) { log.Println(err) },
     })
-    if err != nil {
+    if err := server.Run(); err != nil {
         log.Fatal(err)
     }
     defer func() { _ = server.Close() }()
@@ -66,30 +68,59 @@ A Socket.IO JavaScript client v4.x can connect normally:
 ```js
 import { io } from "socket.io-client";
 
-const socket = io("http://localhost:3000", { transports: ["websocket"] });
+const socket = io("http://localhost:3000", {
+  path: "/socket.io/",
+  transports: ["websocket"],
+  auth: { token, workspaceId },
+});
 
 socket.emit("hello", "alice", (reply) => {
   console.log(reply); // "hello alice"
 });
 ```
 
+## Handshake auth and namespace middleware
+
+For Socket.IO client auth, validate `handshake.Auth` in namespace middleware. Returning a non-nil value rejects the namespace connection and JavaScript clients receive `connect_error`.
+
+```go
+server.Use(func(socket sio.ServerSocket, handshake *sio.Handshake) any {
+    var auth struct {
+        Token       string `json:"token"`
+        WorkspaceID string `json:"workspaceId"`
+    }
+    if err := json.Unmarshal(handshake.Auth, &auth); err != nil {
+        return err
+    }
+    if !validToken(auth.Token, auth.WorkspaceID) {
+        return errors.New("unauthorized")
+    }
+    return nil
+})
+```
+
+Use `EIO.Authenticator` only for request-level checks before the Engine.IO handshake, such as fixed internal headers or IP allowlists.
+
 ## Configuration at a glance
 
 ### Required
 
-You must provide one of the following:
+You must provide `ServerConfig.Secret`, and one of the address sources below.
 
+- `ServerConfig.Secret`, a non-empty shared secret used to authenticate peer POSTs on the built-in cluster channel.
 - `ServerConfig.Port`, for example `"3000"` when your process listens on `:3000`.
 - A full `Cluster.AdvertiseURL`, for example `"http://10.0.0.9:3000"`.
 - An environment-provided port: `SIO_CLUSTER_PORT`, `SOCKETIO_CLUSTER_PORT`, `SOCKETIO_PORT`, `PORT`, `HTTP_PORT`, or Kubernetes `<SERVICE>_SERVICE_PORT`.
 
-If neither a port nor a full advertise URL is available, `NewServer` returns an error.
+If the secret is empty, or if neither a port nor a full advertise URL is available, `server.Run()` returns an error.
 
 ### Optional
 
 | Option | Purpose | Default |
 | --- | --- | --- |
 | `Path` | Socket.IO endpoint path | `/socket.io/` |
+| `EIO.Authenticator` | Request-level Engine.IO authentication before handshake | nil |
+| `EIO.PingInterval` / `EIO.PingTimeout` | Engine.IO heartbeat tuning | `25s` / `20s` |
 | `Cluster.NodeID` | Stable node identity | `POD_NAME`, `HOSTNAME`, `os.Hostname()`, then random |
 | `Cluster.AdvertiseURL` | Full URL peers use to call this node | Built from host + port |
 | `Cluster.Peers` | Static peer endpoints | `SIO_CLUSTER_PEERS`, `SOCKETIO_CLUSTER_PEERS` |
@@ -103,17 +134,24 @@ If neither a port nor a full advertise URL is available, `NewServer` returns an 
 `Port` is the simplest option for most deployments:
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 `AdvertiseURL` is useful when peers must call a different host or scheme than the local listener:
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{
+server := sio.NewServer(&sio.ServerConfig{
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
     Cluster: sio.ClusterConfig{
         AdvertiseURL: "https://socket-0.example.internal:443",
     },
 })
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 When `AdvertiseURL` is set, it must include scheme, host, and port.
@@ -180,19 +218,23 @@ server.To("leaving").DisconnectSockets(false)
 
 ## Cluster setup
 
-Cluster transport is enabled by default and always mounted at the normal Socket.IO path with `transport=cluster`. Minimal setup is just the server port:
+Cluster transport is enabled by default and always mounted at the normal Socket.IO path with `transport=cluster`. Minimal setup is the server port plus a shared secret:
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
-No `ClusterConfig` is required for single-node use. To talk to other nodes, add one discovery source: static peers, `SIO_CLUSTER_PEERS`, `Cluster.HeadlessDNS`, `SIO_CLUSTER_HEADLESS_DNS`, or a Kubernetes service name. If no peers or DNS discovery are configured, the server behaves as a single node and simply has no remote targets.
+No `ClusterConfig` is required for single-node use, but `ServerConfig.Secret` is still required because the cluster control endpoint is mounted by default. To talk to other nodes, add one discovery source: static peers, `SIO_CLUSTER_PEERS`, `Cluster.HeadlessDNS`, `SIO_CLUSTER_HEADLESS_DNS`, or a Kubernetes service name. If no peers or DNS discovery are configured, the server behaves as a single node and simply has no remote targets.
 
 ### Static peers
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{
+server := sio.NewServer(&sio.ServerConfig{
     Port: "3000",
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
     Cluster: sio.ClusterConfig{
         NodeID: "socket-a",
         Peers: []string{
@@ -201,9 +243,28 @@ server, err := sio.NewServer(&sio.ServerConfig{
         },
     },
 })
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 The peer list can also come from `SIO_CLUSTER_PEERS` or `SOCKETIO_CLUSTER_PEERS` as a comma-separated list.
+
+### Peer authentication
+
+For production, set a shared cluster secret on every pod. Peer POSTs then include `X-Sio-Cluster-Secret`, and requests with a missing or wrong secret are rejected before cluster operations run.
+
+```go
+server := sio.NewServer(&sio.ServerConfig{
+    Port: "3000",
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
+})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
+```
+
+The library does not invent a default secret. A common pattern is `Secret: os.Getenv("SIO_CLUSTER_SECRET")`; if that environment variable is empty, `server.Run()` fails fast.
 
 ### Kubernetes headless DNS
 
@@ -233,7 +294,10 @@ env:
 The application stays minimal and provides the real listen port in code:
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{Port: "3000"})
+server := sio.NewServer(&sio.ServerConfig{Port: "3000", Secret: os.Getenv("SIO_CLUSTER_SECRET")})
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 The inferred service name resolves `<service>.<namespace>.svc`; each resolved IP becomes a peer endpoint. Set `SIO_CLUSTER_SERVICE` only when the service name cannot be inferred from the pod name or does not match the workload name. You can also omit it when using static peers or `Cluster.HeadlessDNS` / `SIO_CLUSTER_HEADLESS_DNS` directly. No Kubernetes API watch or RBAC permission is needed.
@@ -243,14 +307,18 @@ The inferred service name resolves `<service>.<namespace>.svc`; each resolved IP
 Enable CSR when clients may reconnect and should keep room membership and missed broadcasts:
 
 ```go
-server, err := sio.NewServer(&sio.ServerConfig{
+server := sio.NewServer(&sio.ServerConfig{
     Port: "3000",
-    ConnectionStateRecovery: sio.ConnectionStateRecoveryConfig{
+    Secret: os.Getenv("SIO_CLUSTER_SECRET"),
+    ServerConnectionStateRecovery: sio.ServerConnectionStateRecovery{
         Enabled:                  true,
         MaxDisconnectionDuration: time.Minute,
-        SkipMiddlewaresOnReconnect: true,
+        UseMiddlewares:           false,
     },
 })
+if err := server.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 When a client reconnects to the same node, the server restores its session and replays missed broadcasts. If it reconnects to another node, that node asks peers for the recovery state. If no peer has the state anymore, the connection falls back to a normal fresh connection.

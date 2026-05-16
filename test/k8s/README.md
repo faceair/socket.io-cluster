@@ -8,6 +8,7 @@ It deploys two real pods with a headless service and verifies that the library w
 
 - no `SIO_CLUSTER_SERVICE` when the service name matches the Deployment name;
 - no `SIO_CLUSTER_PORT` when `ServerConfig.Port` is set by the server;
+- a required `SIO_CLUSTER_SECRET` shared by both pods for cluster peer authentication;
 - no Kubernetes API watch or RBAC permission;
 - peer discovery through headless DNS inferred from `POD_NAME` and `POD_NAMESPACE`.
 
@@ -68,7 +69,7 @@ A successful run ends with:
 
 ## Cleanup
 
-`run.sh` recreates the namespace at the beginning of each run. To remove the resources after a run:
+`run.sh` recreates the namespace at the beginning of each run and deletes it on exit. Set `KEEP_K8S_E2E=1` if you want to keep resources for debugging, then remove them manually:
 
 ```bash
 kubectl delete namespace socketio-cluster-e2e --ignore-not-found --wait=true

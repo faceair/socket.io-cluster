@@ -8,6 +8,7 @@
 
 - 当 service 名和 Deployment 名一致时，不需要 `SIO_CLUSTER_SERVICE`；
 - server 已通过 `ServerConfig.Port` 设置端口时，不需要 `SIO_CLUSTER_PORT`；
+- 两个 Pod 共享必配的 `SIO_CLUSTER_SECRET`，用于 cluster peer 认证；
 - 不需要 Kubernetes API watch 或 RBAC 权限；
 - 通过 `POD_NAME` 和 `POD_NAMESPACE` 推断出的 headless DNS 自动发现 peers。
 
@@ -68,7 +69,7 @@ NS=my-sio-e2e APP=my-sio IMAGE=my-sio:e2e PORT_A=32081 PORT_B=32082 ./test/k8s/r
 
 ## 清理
 
-`run.sh` 每次开始都会重建 namespace。运行结束后如需删除资源：
+`run.sh` 每次开始都会重建 namespace，并在退出时删除。若需要保留资源排查问题，可设置 `KEEP_K8S_E2E=1`，之后手工清理：
 
 ```bash
 kubectl delete namespace socketio-cluster-e2e --ignore-not-found --wait=true
